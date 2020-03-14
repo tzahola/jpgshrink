@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+IFS=$'\n\t'
+
+raw_output=0
+parallel=0
+total_savings=0
+silent=0
+
+while (( $# > 0 )); do
+    case "$1" in
+        -h|--help)
+            cat <<EOF
+Usage:
+    jpgshrink [options] -- files ...
+
+Options:
+    -h, --help: 
+        display this help
+
+    -s, --silent:
+        don't print progress to stderr
+
+    -r, --raw-output: 
+        produce a single output line with the number of bytes saved
+
+    -p, --parallel:
+        run parallelized via GNU parallel
+EOF
+            exit
+            ;;
+        -p|--parallel)
+            shift
+            parallel=1
+            ;;
+        -r|--raw-output)
+            shift
+            raw_output=1
+            ;;
+        -s|--silent)
+            shift
+            silent=1
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [[ $parallel == 0 ]]; then
+    while read -r -d '' f; do
+        tmp="$(mktemp)"
+        jpegtran -optimize -progressive "$f" >"$tmp"
+
+        icc="$(mktemp)"
+        exiftool -q -icc_profile -b "$f" >"$icc"
+        if [[ -s "$icc" ]]; then 
+            exiftool -q "-icc_profile<=$icc" "$tmp"
+        fi
+        rm "$icc"
+
+        old_size=$(stat -f %z "$f")
+        new_size=$(stat -f %z "$tmp")
+
+        if (( $old_size > $new_size )); then
+            mv "$tmp" "$f"
+            savings=$(( $old_size - $new_size ))
+            if [[ $silent == 0 ]]; then
+                if (( $savings >= 1000000 )); then
+                    printf '%-30s%s\n' "Saved $(( ($savings + 500000) / 1000000 ))M" "$f"
+                elif (( $savings >= 1000 )); then
+                    printf '%-30s%s\n' "Saved $(( ($savings + 500) / 1000 ))K" "$f"
+                else
+                    printf '%-30s%s\n' "Saved $savings" "$f"
+                fi
+            fi
+            total_savings=$(( $total_savings + $savings ))
+        else
+            rm "$tmp"
+            if [[ $silent == 0 ]]; then
+                printf '%-30s%s\n' $'Can\'t compress further' "$f"
+            fi
+        fi >&2
+    done < <(find "$@" \( -iname '*.jpg' -or -iname '*.jpeg' \) -print0)
+else
+    silent_arg=''
+    if [[ $silent == 1 ]]; then
+        silent_arg='-s'
+    fi
+    while read -r savings; do
+        total_savings=$(( $total_savings + $savings ))
+    done < <(parallel -0 -m --lb "$0" -r $silent_arg -- < <(find "$@" \( -iname '*.jpg' -or -iname '*.jpeg' \) -print0))
+fi
+
+if [[ $raw_output == 1 ]]; then
+    printf '%d\n' $total_savings
+else
+    if (( $total_savings >= 1000000000 )); then
+        echo "Saved $(( ($total_savings + 500000000) / 1000000000 ))G" 
+    elif (( $total_savings >= 1000000 )); then
+        echo "Saved $(( ($total_savings + 500000) / 1000000 ))M"
+    elif (( $total_savings >= 1000 )); then
+        echo "Saved $(( ($total_savings + 500) / 1000 ))K"
+    else
+        echo "Saved $total_savings"
+    fi
+fi
