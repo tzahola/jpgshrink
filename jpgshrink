@@ -5,6 +5,7 @@ IFS=$'\n\t'
 
 raw_output=0
 parallel=0
+check=0
 total_savings=0
 silent=0
 
@@ -27,12 +28,19 @@ Options:
 
     -p, --parallel:
         run parallelized via GNU parallel
+
+    -c, --check:
+        verify losslessness via ImageMagick `compare`
 EOF
             exit
             ;;
         -p|--parallel)
             shift
             parallel=1
+            ;;
+        -c|--check)
+            shift
+            check=1
             ;;
         -r|--raw-output)
             shift
@@ -52,6 +60,11 @@ EOF
     esac
 done
 
+if [[ $check == 1 && $parallel == 1 ]]; then
+    echo "Can't use --parallel with --check!" >&2
+    exit 1
+fi
+
 if [[ $parallel == 0 ]]; then
     while read -r -d '' f; do
         tmp="$(mktemp)"
@@ -68,18 +81,31 @@ if [[ $parallel == 0 ]]; then
         new_size=$(stat -f %z "$tmp")
 
         if (( $old_size > $new_size )); then
-            mv "$tmp" "$f"
             savings=$(( $old_size - $new_size ))
             if [[ $silent == 0 ]]; then
                 if (( $savings >= 1000000 )); then
-                    printf '%-30s%s\n' "Saved $(( ($savings + 500000) / 1000000 ))M" "$f"
+                    printf '%-30s%s' "Saved $(( ($savings + 500000) / 1000000 ))M" "$f"
                 elif (( $savings >= 1000 )); then
-                    printf '%-30s%s\n' "Saved $(( ($savings + 500) / 1000 ))K" "$f"
+                    printf '%-30s%s' "Saved $(( ($savings + 500) / 1000 ))K" "$f"
                 else
-                    printf '%-30s%s\n' "Saved $savings" "$f"
+                    printf '%-30s%s' "Saved $savings" "$f"
                 fi
             fi
             total_savings=$(( $total_savings + $savings ))
+
+            if [[ $check == 1 ]]; then
+                printf ' Checking losslessness...'
+                if [[ $(compare -metric AE -define jpeg:dct-method=islow "$f" "$tmp" NULL: 2>&1) == '0' ]]; then
+                    printf ' OK'
+                else
+                    printf ' Error: not lossless! %s vs %s' "$f" "$tmp"
+                    exit 1
+                fi
+            fi
+
+            printf '\n'
+
+            mv "$tmp" "$f"
         else
             rm "$tmp"
             if [[ $silent == 0 ]]; then
